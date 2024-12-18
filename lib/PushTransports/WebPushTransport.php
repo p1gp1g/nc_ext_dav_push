@@ -116,4 +116,8 @@ class WebPushTransport extends Transport {
 			'response' => "",
 		];
 	}
+
+	public function deleteSubscription($subsciptionId) {
+		$this->webPushSubscriptionService->deleteBySubscriptionId($subsciptionId);
+	}
 }

@@ -52,4 +52,24 @@ class WebPushSubscriptionMapper extends QBMapper {
 		
 		return $this->findEntity($qb);
 	}
+
+	/**
+	 * Deletes an entity from the table
+	 *
+	 * @param WebPushSubscription $entity the entity that should be deleted
+	 * @psalm-param WebPushSubscription $entity the entity that should be deleted
+	 * @return WebPushSubscription the deleted entity
+	 * @psalm-return WebPushSubscription the deleted entity
+	 * @throws \Exception
+	 */
+	public function delete(Entity $entity): Entity {
+		$qb = $this->db->getQueryBuilder();
+
+		$qb->delete(self::TABLENAME)
+			->where(
+				$qb->expr()->eq('subscription_id', $qb->createNamedParameter($entity->getSubscriptionId(), IQueryBuilder::PARAM_INT))
+			);
+		$qb->executeStatement();
+		return $entity;
+	}
 }

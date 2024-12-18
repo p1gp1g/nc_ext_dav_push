@@ -54,7 +54,7 @@ abstract class Transport {
 			errors: ?array[string], // should be human readable
 			responseStatus: ?int, // http response code to the registration
 			response: array, // will be converted to xml and used as the response to the registration
-			unsubscribeLink: ?string, // overwrites unsubscribe link, transport needs to handle cleanup of entry in db itself
+			unsubscribeLink: ?string, // use custom unsubscribe link instead of generic link, transport needs to handle cleanup of entry in db itself by calling SubscriptionService
 		]
 	*/
 	abstract public function registerSubscription($subsciptionId, $options);
@@ -67,7 +67,11 @@ abstract class Transport {
 	abstract public function getSubscriptionIdFromOptions(string $userId, string $collectionName, $options): ?int;
 
 	// Change mutable options of the subscription (if any exist)
-	abstract public function updateSubscription($subsciptionId, $options);
+	abstract public function updateSubscription(int $subsciptionId, $options);
 
 	abstract public function notify(string $userId, string $collectionName, int $subscriptionId);
+
+	// Delete the subscription
+	// Involves doing any transport specific de-registration work, deleting any data about this subscription in transport db tables
+	abstract public function deleteSubscription(int $subsciptionId);
 }
