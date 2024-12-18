@@ -42,7 +42,7 @@ abstract class Transport {
 	/* Must return an array of the shape:
 		[
 			valid: bool,
-			errors: ?array[string], // should be human readable
+			errors: array[string], // should be human readable
 		]
 	*/
 	abstract public function validateOptions($options): array;

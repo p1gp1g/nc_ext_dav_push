@@ -58,11 +58,12 @@ class WebPushTransport extends Transport {
 
 		if(isset($pushResource) && $pushResource !== '') {
 			return [
-				'success' => True,
+				'valid' => True,
+				'errors' => [],
 			];
 		} else {
 			return [
-				'success' => False,
+				'valid' => False,
 				'errors' => ["push resource not provided"]
 			];
 		}

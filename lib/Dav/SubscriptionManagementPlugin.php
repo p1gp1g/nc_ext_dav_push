@@ -33,7 +33,9 @@ use OCA\DavPush\Service\SubscriptionService;
 
 use OCP\IUserSession;
 use OCP\IURLGenerator;
+use OCP\IDBConnection;
 use OCP\AppFramework\Http;
+use OCP\AppFramework\Db\TTransactional;
 
 use Sabre\DAV\Server;
 use Sabre\DAV\ServerPlugin;
@@ -41,6 +43,7 @@ use Sabre\HTTP\RequestInterface;
 use Sabre\HTTP\ResponseInterface;
 
 class SubscriptionManagementPlugin extends ServerPlugin {
+	use TTransactional;
 
 	public const PUSH_PREFIX = '{DAV:Push}';
 	public const PUSH_REGISTER = self::PUSH_PREFIX . "push-register";
@@ -60,7 +63,8 @@ class SubscriptionManagementPlugin extends ServerPlugin {
 		private IUserSession $userSession,
 		private TransportManager $transportManager,
 		private IURLGenerator $URLGenerator,
-		private SubscriptionService $subscriptionService
+		private SubscriptionService $subscriptionService,
+		private IDBConnection $db,
 	) {
 	}
 
@@ -68,6 +72,98 @@ class SubscriptionManagementPlugin extends ServerPlugin {
 		$this->server = $server;
 
 		$this->server->on('method:POST', [$this, 'httpPost']);
+	}
+
+	private function parsePushRegisterElement(array $subElements) {
+		$errors = [];
+
+		$subscriptionElementIncluded = False;
+
+		$parsedExpiresElement = null;
+
+		foreach($subElements as $parameter) {
+			if($parameter["name"] == self::PUSH_SUBSCRIPTION) {
+				if(!$subscriptionElementIncluded) {
+					$subscriptionElementIncluded = True;
+				
+					$parsedSubscriptionElement = $this->parseSubscriptionElement($parameter["value"]);
+					$errors = array_merge($errors, $parsedSubscriptionElement["errors"]);
+				} else {
+					$errors[] = "more than one subscriptions at a time are not allowed";
+				}
+			} elseif($parameter["name"] == self::PUSH_EXPIRES && !isset($subscriptionExpires)) {
+				$parsedExpiresElement = $this->parseExpiresElement($parameter["value"]);
+			}
+		}
+
+		if(!$subscriptionElementIncluded) {
+			$errors[] = "no subscription included";
+		}
+
+		if(sizeof($errors) === 0) {
+			return [
+				"errors" => [],
+				"subscriptionType" => $parsedSubscriptionElement["type"],
+				"subscriptionOptions" => $parsedSubscriptionElement["options"],
+				"requestedSubscriptionExpiration" => $parsedExpiresElement,
+			];
+		} else {
+			return [
+				"errors" => $errors,
+				"subscriptionType" => null,
+				"subscriptionOptions" => null,
+				"requestedSubscriptionExpiration" => null,
+			];
+		}
+	}
+
+	private function parseSubscriptionElement(array $subElements): array {
+		// ensure subscription element only has one child element
+		if(sizeof($subElements) == 1) {
+			// parse child element
+			$type = $subElements[0]["name"];
+			$type = preg_replace('/^\{DAV:Push\}/', '', $type);
+			$type = preg_replace('/-subscription$/', '', $type);
+
+			$options = $subElements[0]["value"];
+
+			return [
+				"errors" => [],
+				"type" => $type,
+				"options" => $options,
+			];
+		} else {
+			return [
+				"errors" => [
+					"only one subscription allowed",
+				],
+				"type" => null,
+				"options" => null,
+			];
+		}
+	}
+
+	private function parseExpiresElement(string $elementValue): int {
+		return \DateTime::createFromFormat(self::IMF_FIXDATE_FORMAT, $elementValue)->getTimestamp();
+	}
+
+	private function getSubscriptionExpirationTimestamp(?int $preferredExpirationTimestamp): int {
+		$inOneWeekTimestamp = strtotime("+1 week");
+
+		if(isset($preferredExpirationTimestamp)) {
+			if($preferredExpirationTimestamp < time()) {
+				// expiration timestamp in the past was requested, returning default (one week)
+				return $inOneWeekTimestamp;
+			} else if($preferredExpirationTimestamp > $inOneWeekTimestamp) {
+				// requested expiration is further in the future than one week, clamping to one week
+				return $inOneWeekTimestamp;
+			} else {
+				return $preferredExpirationTimestamp;
+			}
+		} else {
+			// expiration was not set, default to in one week
+			return $inOneWeekTimestamp;
+		}
 	}
 
 	public function httpPost(RequestInterface $request, ResponseInterface $response) {
@@ -90,109 +186,104 @@ class SubscriptionManagementPlugin extends ServerPlugin {
 		// re-populated the request body with the existing data.
 		$request->setBody($requestBody);
 
-		$parameters = $this->server->xml->parse($requestBody, $request->getUrl(), $documentType);
+		$requestBodyXML = $this->server->xml->parse($requestBody, $request->getUrl(), $documentType);
 
+		// only react to post request if top level xml element is <push-register>
 		if($documentType == self::PUSH_REGISTER) {
 			$errors = [];
 
-			$subscriptionParameterIncluded = False;
+			[
+				"errors" => $parseErrors,
+				"subscriptionType" => $subscriptionType,
+				"subscriptionOptions" => $subscriptionOptions,
+				"requestedSubscriptionExpiration" => $requestedSubscriptionExpiration,
+			] = $this->parsePushRegisterElement($requestBodyXML);
+			
 
-			$subscriptionType = "";
-			$subscriptionOptions = [];
-			$subscriptionExpires = 0;
+			if(sizeof($parseErrors) > 0) {
+				$errors = array_merge($errors, $parseErrors);
+			} else {
+				$subscriptionExpires = $this->getSubscriptionExpirationTimestamp($requestedSubscriptionExpiration);
+				
+				$transport = $this->transportManager->getTransport($subscriptionType);
 
-			foreach($parameters as $parameter) {
-				if($parameter["name"] == self::PUSH_SUBSCRIPTION && !$subscriptionParameterIncluded) {
-					$subscriptionParameterIncluded = True;
-					
-					if(sizeof($parameter["value"]) == 1) {
-						$subscriptionType = $parameter["value"][0]["name"];
-						$subscriptionType = preg_replace('/^\{DAV:Push\}/', '', $subscriptionType);
-						$subscriptionType = preg_replace('/-subscription$/', '', $subscriptionType);
-
-						$subscriptionOptions = $parameter["value"][0]["value"];
-					} else {
-						$errors[] = "only one subscription allowed";
-					}
-				} elseif($parameter["name"] == self::PUSH_EXPIRES && $subscriptionExpires === 0) {
-					$subscriptionExpires = \DateTime::createFromFormat(self::IMF_FIXDATE_FORMAT, $parameter["value"])->getTimestamp();
-				}
-			}
-
-			if(!$subscriptionParameterIncluded) {
-				$errors[] = "no subscription included";
-			}
-
-			$transport = $this->transportManager->getTransport($subscriptionType);
-
-			if(!is_null($transport)) {
-				[
-					'success' => $validateSuccess,
-					'errors' => $validateErrors,
-				] = $transport->validateOptions($subscriptionOptions);
-
-				if(!$validateSuccess) {
-					if(isset($validateErrors) && !empty($validateErrors)) {
-						$errors = array_merge($errors, $validateErrors);
-					} else {
-						$errors[] = "options validation error";
-					}
+				if(is_null($transport)) {
+					$errors[] = $subscriptionType . " transport does not exist";
 				} else {
-					$user = $this->userSession->getUser();
+					[
+						'valid' => $validateSuccess,
+						'errors' => $validateErrors,
+					] = $transport->validateOptions($subscriptionOptions);
+	
+					if(!$validateSuccess) {
+						if(isset($validateErrors) && !empty($validateErrors)) {
+							$errors = array_merge($errors, $validateErrors);
+						} else {
+							$errors[] = "options validation error";
+						}
+					} else {
+						$user = $this->userSession->getUser();
+	
+						$existingSubscriptionId = $transport->getSubscriptionIdFromOptions($user->getUID(), $node->getName(), $subscriptionOptions);
+	
+						if(!is_int($existingSubscriptionId)) {
+							try {
+								// create new subscription entry in db and register with transport. If the transport register fails roll back db transaction
+								$this->atomic(function () use ($user, $node, $subscriptionType, $subscriptionExpires, $subscriptionOptions, &$subscription, $transport, &$errors, &$responseStatus, &$responseContent, &$unsubscribeLink) {
+									$subscription = $this->subscriptionService->create($user->getUID(), $node->getName(), $subscriptionType, $subscriptionExpires);
 
-					$existingSubscriptionId = $transport->getSubscriptionIdFromOptions($user->getUID(), $node->getName(), $subscriptionOptions);
-
-					if(!is_int($existingSubscriptionId)) {
-						// create new subscription entry in db
-						$subscription = $this->subscriptionService->create($user->getUID(), $node->getName(), $subscriptionType, $subscriptionExpires);
-
-						[
-							'success' => $registerSuccess,
-							'errors' => $registerErrors,
-							'responseStatus' => $responseStatus,
-							'response' => $responseContent,
-							'unsubscribeLink' => $unsubscribeLink,
-						] = $transport->registerSubscription($subscription->getId(), $subscriptionOptions);
-
-						$responseStatus = $responseStatus ?? Http::STATUS_CREATED;
-
-						if(!$registerSuccess) {
-							if(isset($registerErrors) && !empty($registerErrors)) {
-								$errors = array_merge($errors, $registerErrors);
-							} else {
+									[
+										'success' => $registerSuccess,
+										'errors' => $registerErrors,
+										'responseStatus' => $responseStatus,
+										'response' => $responseContent,
+										'unsubscribeLink' => $unsubscribeLink,
+									] = $transport->registerSubscription($subscription->getId(), $subscriptionOptions);
+			
+									$responseStatus = $responseStatus ?? Http::STATUS_CREATED;
+			
+									if(!$registerSuccess) {
+										if(isset($registerErrors) && !empty($registerErrors)) {
+											$errors = array_merge($errors, $registerErrors);
+										} else {
+											$errors[] = "registration error";
+										}
+									}
+								}, $this->db);
+							} catch (\Exception $e) {
+								// return error after rollback
 								$errors[] = "registration error";
 							}
-						}
-					} else {
-						// implicitly checks if subscription found by transport is really owned by correct user
-						$subscription = $this->subscriptionService->find($user->getUID(), $existingSubscriptionId);
-						
-						// check if subscription found by transport is really for correct collection
-						if($subscription->getCollectionName() !== $node->getName()) {
-							$errors[] = "subscription update error";
+							
 						} else {
-							[
-								'success' => $updateSuccess,
-								'errors' => $updateErrors,
-								'response' => $responseContent,
-							] =	$transport->updateSubscription($subscription->getId(), $subscriptionOptions);
-
-							if(!$updateSuccess) {
-								if(isset($updateErrors) && !empty($updateErrors)) {
-									$errors = array_merge($errors, $updateErrors);
-								} else {
-									$errors[] = "subscription update error";
-								}
+							// implicitly checks if subscription found by transport is really owned by correct user
+							$subscription = $this->subscriptionService->find($user->getUID(), $existingSubscriptionId);
+							
+							// check if subscription found by transport is really for correct collection
+							if($subscription->getCollectionName() !== $node->getName()) {
+								$errors[] = "subscription update error";
 							} else {
-								$subscription = $this->subscriptionService->update($user->getUID(), $subscription->getId(), $subscriptionExpires);
+								[
+									'success' => $updateSuccess,
+									'errors' => $updateErrors,
+									'response' => $responseContent,
+								] =	$transport->updateSubscription($subscription->getId(), $subscriptionOptions);
 	
-								$responseStatus = Http::STATUS_CREATED;
+								if(!$updateSuccess) {
+									if(isset($updateErrors) && !empty($updateErrors)) {
+										$errors = array_merge($errors, $updateErrors);
+									} else {
+										$errors[] = "subscription update error";
+									}
+								} else {
+									$subscription = $this->subscriptionService->update($user->getUID(), $subscription->getId(), $subscriptionExpires);
+		
+									$responseStatus = Http::STATUS_CREATED;
+								}
 							}
 						}
 					}
 				}
-			} else {
-				$errors[] = $subscriptionType . " transport does not exist";
 			}
 
 			if(sizeof($errors) == 0) {
