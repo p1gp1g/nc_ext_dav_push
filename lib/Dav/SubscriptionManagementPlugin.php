@@ -45,7 +45,7 @@ use Sabre\HTTP\ResponseInterface;
 class SubscriptionManagementPlugin extends ServerPlugin {
 	use TTransactional;
 
-	public const PUSH_PREFIX = '{DAV:Push}';
+	public const PUSH_PREFIX = '{https://bitfire.at/webdav-push}';
 	public const PUSH_REGISTER = self::PUSH_PREFIX . "push-register";
 	public const PUSH_SUBSCRIPTION = self::PUSH_PREFIX . "subscription";
 	public const PUSH_EXPIRES = self::PUSH_PREFIX . "expires";
