@@ -293,6 +293,8 @@ class SubscriptionManagementPlugin extends ServerPlugin {
 				$unsubscribeLink = $unsubscribeLink ?? $this->URLGenerator->getAbsoluteURL("/apps/dav_push/subscriptions/" . $subscription->getId());
 				$response->setHeader("Location", $unsubscribeLink);
 
+				$response->setHeader("Expires", date(self::IMF_FIXDATE_FORMAT, $subscription->getExpirationTimestamp()));
+
 				$xml = $this->server->xml->write(self::PUSH_REGISTER, $responseContent);
 				$response->setBody($xml);
 			} else {
