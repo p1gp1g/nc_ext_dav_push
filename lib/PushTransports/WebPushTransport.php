@@ -93,6 +93,10 @@ class WebPushTransport extends Transport {
 			'http' => [
 				'method' => 'POST',
 				'content' => $content,
+				'header' => [
+						'TTL: 86400',
+						'Content-Encoding: aes128gcm',
+					],
 			],
 		];
 
